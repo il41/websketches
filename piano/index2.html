@@ -1,0 +1,186 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Poly Synth with Visual Balls</title>
+<script src="https://cdn.jsdelivr.net/npm/p5@1.6.0/lib/p5.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/p5@1.6.0/lib/addons/p5.sound.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+  #ui {
+    position: absolute; top:0; left:0; right:0;
+    padding: 10px; display:flex; gap:18px; align-items:center; flex-wrap:wrap;
+    background:#fafafa; border-bottom:1px solid #eee; z-index: 2;
+  }
+  .control { font-size:13px; }
+  label { display:block; font-size:12px; margin-bottom:4px; color:#333; }
+  .small { font-size:12px; color:#666; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <div class="control">
+    <label>Attack (s)</label>
+    <input id="attack" type="range" min="0" max="1" step="0.01" value="0.02">
+    <div class="small" id="attackVal">0.02</div>
+  </div>
+  <div class="control">
+    <label>Decay (s)</label>
+    <input id="decay" type="range" min="0" max="1" step="0.01" value="0.1">
+    <div class="small" id="decayVal">0.10</div>
+  </div>
+  <div class="control">
+    <label>Sustain (0–1)</label>
+    <input id="sustain" type="range" min="0" max="1" step="0.01" value="0.7">
+    <div class="small" id="sustainVal">0.70</div>
+  </div>
+  <div class="control">
+    <label>Release (s)</label>
+    <input id="release" type="range" min="0" max="3" step="0.01" value="0.5">
+    <div class="small" id="releaseVal">0.50</div>
+  </div>
+  <div class="control">
+    <label>Volume (dB)</label>
+    <input id="volume" type="range" min="-48" max="6" step="0.5" value="-6">
+    <div class="small" id="volumeVal">-6 dB</div>
+  </div>
+  <div style="margin-left:auto; font-size:13px; color:#444;">
+    Wave: <strong>sine</strong> · Octave: <span id="octaveVal">4</span>
+  </div>
+  <button id="startAudio" style="padding:6px 12px;font-size:13px;">Start Audio</button>
+</div>
+
+<script>
+let masterGain;
+let activeNotes = {};
+let balls = [];
+let currentOctave = 4;
+
+const whiteKeys = ['a','s','d','f','g','h','j','k','l',';'];
+const baseWhiteNotes = ['C','D','E','F','G','A','B','C','D','E'];
+const blackKeys = ['w','e','t','y','u','o','p'];
+const baseBlackNotes = ['C#','D#','F#','G#','A#','C#','D#'];
+
+function noteToFreq(note) {
+  const match = note.match(/^([A-G])(#?)(-?\d+)$/);
+  const name = match[1], sharp = match[2]==="#"?1:0, octave=parseInt(match[3]);
+  const semitonesFromC={C:0,D:2,E:4,F:5,G:7,A:9,B:11}[name];
+  const midi=(octave+1)*12+semitonesFromC+sharp;
+  return 440 * Math.pow(2,(midi-69)/12);
+}
+
+function dbToGain(db) { return Math.pow(10, db/20); }
+
+function getADSR() {
+  return {
+    a: parseFloat(attack.value),
+    d: parseFloat(decay.value),
+    s: parseFloat(sustain.value),
+    r: parseFloat(release.value)
+  };
+}
+
+function playNoteForKey(k, noteName) {
+  if(activeNotes[k]) return;
+  const freq = noteToFreq(noteName);
+  const osc = new p5.Oscillator('sine');
+  osc.freq(freq);
+  osc.start();
+
+  const voiceGain = getAudioContext().createGain();
+  voiceGain.gain.value = 0.0001;
+  osc.disconnect(); osc.connect(voiceGain); voiceGain.connect(masterGain);
+
+  const {a,d,s,r} = getADSR();
+  const now = getAudioContext().currentTime;
+  voiceGain.gain.cancelScheduledValues(now);
+  voiceGain.gain.setValueAtTime(0.0001, now);
+  voiceGain.gain.linearRampToValueAtTime(1.0, now+a);
+  voiceGain.gain.linearRampToValueAtTime(s, now+a+d);
+
+  // create ball visual for note
+  balls.push({x:random(width), y:random(height), r:0, maxR:50+random(50), lifetime:r, alpha:255, created:millis()});
+
+  activeNotes[k] = {osc, gainNode:voiceGain, releaseTime:r};
+}
+
+function stopNoteByKey(k) {
+  const record = activeNotes[k]; if(!record) return;
+  const {gainNode, osc, releaseTime} = record;
+  const {r} = getADSR();
+  const now = getAudioContext().currentTime;
+  gainNode.gain.cancelScheduledValues(now);
+  gainNode.gain.setValueAtTime(gainNode.gain.value, now);
+  gainNode.gain.linearRampToValueAtTime(0.0001, now + r);
+  setTimeout(()=>{ osc.stop(); osc.disconnect(); gainNode.disconnect(); }, Math.max(1,r*1000+50));
+  delete activeNotes[k];
+}
+
+function keyToNote(k){
+  k=k.toLowerCase();
+  const w=whiteKeys.indexOf(k);
+  const b=blackKeys.indexOf(k);
+  if(w!==-1) return baseWhiteNotes[w]+(currentOctave+(w>=7?1:0));
+  if(b!==-1) return baseBlackNotes[b]+(currentOctave+(b>=5?1:0));
+  return null;
+}
+
+function setup(){
+  createCanvas(windowWidth, windowHeight);
+
+  masterGain = getAudioContext().createGain();
+  masterGain.gain.value = dbToGain(parseFloat(volume.value));
+  masterGain.connect(getAudioContext().destination);
+
+  attack.oninput=decay.oninput=sustain.oninput=release.oninput=()=>{
+    attackVal.textContent=parseFloat(attack.value).toFixed(2);
+    decayVal.textContent=parseFloat(decay.value).toFixed(2);
+    sustainVal.textContent=parseFloat(sustain.value).toFixed(2);
+    releaseVal.textContent=parseFloat(release.value).toFixed(2);
+  };
+  volume.oninput=()=>{
+    volumeVal.textContent=volume.value+' dB';
+    masterGain.gain.setValueAtTime(dbToGain(parseFloat(volume.value)), getAudioContext().currentTime);
+  };
+
+  startAudio.addEventListener('click', ()=>{ userStartAudio(); });
+}
+
+function draw(){
+  background(24,24,30, 200);
+
+  // update and draw balls
+  for(let i=balls.length-1;i>=0;i--){
+    let b=balls[i];
+    const elapsed=(millis()-b.created)/1000;
+    const t=elapsed/b.lifetime;
+    if(t>=1){ balls.splice(i,1); continue; }
+    b.r = lerp(0,b.maxR,t);
+    b.alpha = lerp(255,0,t);
+    noStroke();
+    fill(200,100,255,b.alpha);
+    ellipse(b.x,b.y,b.r*2);
+  }
+
+  // simple keyboard overlay
+  fill(255);
+  textSize(18); textAlign(LEFT,TOP);
+  text('Press keys (A–; W E T Y U O P) · Octave Z/X',20,10);
+}
+
+function keyPressed(){
+  if(key==='z'){ currentOctave=max(1,currentOctave-1); octaveVal.textContent=currentOctave; return; }
+  if(key==='x'){ currentOctave=min(7,currentOctave+1); octaveVal.textContent=currentOctave; return; }
+  const noteName = keyToNote(key);
+  if(!noteName) return;
+  if(getAudioContext().state!=='running') userStartAudio();
+  playNoteForKey(key, noteName);
+}
+
+function keyReleased(){ if(keyToNote(key)) stopNoteByKey(key); }
+
+window.addEventListener('blur',()=>{ for(const k in {...activeNotes}) stopNoteByKey(k); });
+function windowResized(){ resizeCanvas(windowWidth,windowHeight); }
+</script>
+</body>
+</html>
